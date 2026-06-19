@@ -1,3 +1,4 @@
+//go:build linux
 package main
 
 import (
@@ -16,5 +17,5 @@ func setupFlags() {
 func main() {
 	setupFlags()
 	log.Println("JavinKV loading...")
-	server.RunSyncTCPServer()
+	server.RunAsyncTCPServer()
 }

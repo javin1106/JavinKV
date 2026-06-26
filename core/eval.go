@@ -49,6 +49,9 @@ func evalSET(args []string, c io.ReadWriter) error {
 			if err != nil {
 				return errors.New("(error) ERR value is not an integer or out of range")
 			}
+			if exDurationSec <= 0 {
+				return errors.New("(error) ERR invalid expire time in 'set' command")
+			}
 			exDurationMs = exDurationSec * 1000 // in Redis, time is by default in ms
 
 		default:
@@ -78,6 +81,7 @@ func evalGET(args []string, c io.ReadWriter) error {
 
 	// if key already expired then return nil
 	if obj.ExpiresAt != -1 && obj.ExpiresAt <= time.Now().UnixMilli() {
+		Del(key)
 		c.Write(RESP_NIL)
 		return nil
 	}
@@ -102,6 +106,15 @@ func evalTTL(args []string, c io.ReadWriter) error {
 		return nil
 	}
 
+	durationMs := obj.ExpiresAt - time.Now().UnixMilli()
+
+	// if key expired i.e. key does not exist hence return -2
+	if durationMs < 0 {
+		Del(key)
+		c.Write([]byte(":-2\r\n"))
+		return nil
+	}
+
 	// if object exist, but no expiration is set on it then send -1
 	if obj.ExpiresAt == -1 {
 		c.Write([]byte(":-1\r\n"))
@@ -110,15 +123,56 @@ func evalTTL(args []string, c io.ReadWriter) error {
 
 	// compute the time remaining for the key to expire and
 	// return the RESP encoded form of it
-	durationMs := obj.ExpiresAt - time.Now().UnixMilli()
+	c.Write(Encode(int64(durationMs/1000), false))
+	return nil
+}
 
-	// if key expired i.e. key does not exist hence return -2
-	if durationMs < 0 {
-		c.Write([]byte(":-2\r\n"))
+func evalDEL(args []string, c io.ReadWriter) error {
+	if len(args) == 0 {
+		return errors.New("(error)ERR wrong number of arguments for 'del' command")
+	}
+	var countDeleted int = 0
+	for _, key := range args {
+		obj := Get(key)
+		if obj != nil && obj.ExpiresAt != -1 && obj.ExpiresAt <= time.Now().UnixMilli() {
+			Del(key)
+			continue
+		}
+		if ok := Del(key); ok {
+			countDeleted++
+		}
+	}
+	c.Write(Encode(countDeleted, false))
+	return nil
+}
+
+func evalEXPIRE(args []string, c io.ReadWriter) error {
+	if len(args) != 2 {
+		return errors.New("(error)ERR wrong number of arguments for 'expire' command")
+	}
+	var key string = args[0]
+	exDurationSec, err := strconv.ParseInt(args[1], 10, 64)
+	if err != nil {
+		return errors.New("(error) ERR value is not an integer or out of range")
+	}
+	if exDurationSec <= 0 {
+		return errors.New("(error) ERR invalid expire time in 'expire' command")
+	}
+	obj := Get(key)
+
+	// unsuccessful -> doesn't exits, timeout not set
+	if obj == nil {
+		c.Write([]byte(":0\r\n"))
+		return nil
+	}
+	if obj.ExpiresAt != -1 && obj.ExpiresAt <= time.Now().UnixMilli() {
+		Del(key)
+		c.Write([]byte(":0\r\n"))
 		return nil
 	}
 
-	c.Write(Encode(int64(durationMs/1000), false))
+	obj.ExpiresAt = time.Now().UnixMilli() + exDurationSec*1000
+	c.Write([]byte(":1\r\n"))
 	return nil
 }
 
@@ -134,7 +188,11 @@ func EvalAndRespond(cmd *RedisCmd, c io.ReadWriter) error {
 		return evalGET(cmd.Args, c)
 	case "TTL":
 		return evalTTL(cmd.Args, c)
+	case "DEL":
+		return evalDEL(cmd.Args, c)
+	case "EXPIRE":
+		return evalEXPIRE(cmd.Args, c)
 	default:
-		return evalPING(cmd.Args, c)
+		return errors.New("(error) ERR unknown command")
 	}
 }
